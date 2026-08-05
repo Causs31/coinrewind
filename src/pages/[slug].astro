@@ -1,0 +1,19 @@
+---
+import { readFile } from 'node:fs/promises';
+import CoinPage from '../components/CoinPage.astro';
+
+export async function getStaticPaths() {
+  const coins = JSON.parse(await readFile('data/coins.json', 'utf8'));
+  const paths = [];
+  for (const coin of coins) {
+    const data = JSON.parse(await readFile(`public/data/prices/${coin.slug}.json`, 'utf8'));
+    paths.push({ params: { slug: coin.slug }, props: { coin: data } });
+  }
+  return paths;
+}
+
+const { coin } = Astro.props;
+const allCoins = JSON.parse(await readFile('data/coins.json', 'utf8'));
+---
+
+<CoinPage coin={coin} allCoins={allCoins} />

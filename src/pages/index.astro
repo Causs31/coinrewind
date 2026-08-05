@@ -1,0 +1,9 @@
+---
+import { readFile } from 'node:fs/promises';
+import CoinPage from '../components/CoinPage.astro';
+
+const coin = JSON.parse(await readFile('public/data/prices/bitcoin.json', 'utf8'));
+const allCoins = JSON.parse(await readFile('data/coins.json', 'utf8'));
+---
+
+<CoinPage coin={coin} allCoins={allCoins} />

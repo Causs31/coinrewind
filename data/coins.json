@@ -1,0 +1,22 @@
+[
+  { "slug": "bitcoin",       "symbol": "BTC",  "name": "Bitcoin",       "color": "#F7931A", "cgId": "bitcoin" },
+  { "slug": "ethereum",      "symbol": "ETH",  "name": "Ethereum",      "color": "#627EEA", "cgId": "ethereum" },
+  { "slug": "xrp",           "symbol": "XRP",  "name": "XRP",           "color": "#346AA9", "cgId": "ripple" },
+  { "slug": "bnb",           "symbol": "BNB",  "name": "BNB",           "color": "#F0B90B", "cgId": "binancecoin" },
+  { "slug": "solana",        "symbol": "SOL",  "name": "Solana",        "color": "#9945FF", "cgId": "solana" },
+  { "slug": "dogecoin",      "symbol": "DOGE", "name": "Dogecoin",      "color": "#C2A633", "cgId": "dogecoin" },
+  { "slug": "cardano",       "symbol": "ADA",  "name": "Cardano",       "color": "#0033AD", "cgId": "cardano" },
+  { "slug": "tron",          "symbol": "TRX",  "name": "TRON",          "color": "#EF0027", "cgId": "tron" },
+  { "slug": "avalanche",     "symbol": "AVAX", "name": "Avalanche",     "color": "#E84142", "cgId": "avalanche-2" },
+  { "slug": "chainlink",     "symbol": "LINK", "name": "Chainlink",     "color": "#2A5ADA", "cgId": "chainlink" },
+  { "slug": "shiba-inu",     "symbol": "SHIB", "name": "Shiba Inu",     "color": "#FFA409", "cgId": "shiba-inu" },
+  { "slug": "polkadot",      "symbol": "DOT",  "name": "Polkadot",      "color": "#E6007A", "cgId": "polkadot" },
+  { "slug": "litecoin",      "symbol": "LTC",  "name": "Litecoin",      "color": "#345D9D", "cgId": "litecoin" },
+  { "slug": "bitcoin-cash",  "symbol": "BCH",  "name": "Bitcoin Cash",  "color": "#8DC351", "cgId": "bitcoin-cash" },
+  { "slug": "stellar",       "symbol": "XLM",  "name": "Stellar",       "color": "#08B5E5", "cgId": "stellar" },
+  { "slug": "near-protocol", "symbol": "NEAR", "name": "NEAR Protocol", "color": "#00EC97", "cgId": "near" },
+  { "slug": "uniswap",       "symbol": "UNI",  "name": "Uniswap",       "color": "#FF007A", "cgId": "uniswap" },
+  { "slug": "hedera",        "symbol": "HBAR", "name": "Hedera",        "color": "#8259EF", "cgId": "hedera-hashgraph" },
+  { "slug": "sui",           "symbol": "SUI",  "name": "Sui",           "color": "#4DA2FF", "cgId": "sui" },
+  { "slug": "pepe",          "symbol": "PEPE", "name": "Pepe",          "color": "#3D8130", "cgId": "pepe" }
+]

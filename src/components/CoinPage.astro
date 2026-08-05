@@ -1,0 +1,357 @@
+---
+import {
+  MONTHS, buildYearlyRows, formatDate, formatPrice, formatChange, punchlineText,
+} from '../lib/prices.js';
+import '../styles/global.css';
+
+const { coin, allCoins } = Astro.props;
+
+// Pre-rendered at build time using the UTC date (server timezone).
+// The browser re-renders with the visitor's LOCAL date on load — see init block.
+const now = new Date();
+const month = now.getUTCMonth() + 1;
+const day = now.getUTCDate();
+const rows = buildYearlyRows(coin.prices, month, day);
+const punchline = punchlineText(rows);
+const dateLabel = `${MONTHS[month - 1]} ${day}`;
+
+const title = `${coin.name} price history on ${dateLabel} — CoinRewind`;
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={`What was ${coin.name} worth every year on ${dateLabel}? ${punchline}. Year-by-year price history.`} />
+    <meta property="og:title" content={`${coin.name} every ${dateLabel}: ${punchline}`} />
+    <meta property="og:description" content={`The price of ${coin.name} on ${dateLabel}, year after year.`} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={`https://coinrewind.io/${coin.slug}`} />
+    <link rel="canonical" href={`https://coinrewind.io/${coin.slug}`} />
+  </head>
+  <body style={`--accent: ${coin.color}`}>
+    <header class="topbar">
+      <a class="brand" href="/bitcoin">COIN<span>REWIND</span></a>
+    </header>
+
+    <main>
+      <div class="h1-wrap">
+        <h1>
+          <button id="coin-btn" class="title-btn" aria-haspopup="true">
+            <span class="txt">{coin.name.toUpperCase()}</span><span class="chev">▾</span>
+          </button>{' '}
+          PRICE HISTORY ON{' '}
+          <button id="date-btn" class="title-btn" aria-haspopup="true">
+            <span class="txt">{dateLabel.toUpperCase()}</span><span class="chev">▾</span>
+          </button>
+        </h1>
+
+        <div id="coin-panel" class="panel" hidden>
+          {allCoins.map((c) => (
+            <button class={`panel-item ${c.slug === coin.slug ? 'selected' : ''}`} data-slug={c.slug}>
+              {c.name}
+            </button>
+          ))}
+        </div>
+
+        <div id="date-panel" class="panel" hidden>
+          <div class="months-grid">
+            {MONTHS.map((m, i) => (
+              <button class={`panel-item ${i + 1 === month ? 'selected' : ''}`} data-month={i + 1}>
+                {m}
+              </button>
+            ))}
+          </div>
+          <div class="days" id="days-grid"></div>
+        </div>
+      </div>
+
+      <p class="punchline">{punchline}</p>
+
+      <table class="prices">
+        <thead>
+          <tr><th>Date</th><th>Price</th><th>1Y Change</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const change = formatChange(row.changePct);
+            return (
+              <tr>
+                <td>{formatDate(row.dayEpoch)}</td>
+                <td class="price">{formatPrice(row.price)}</td>
+                <td class={`change ${change?.dir ?? ''}`}>
+                  {change ? (change.dir === 'up' ? '▲ ' : change.dir === 'down' ? '▼ ' : '') + change.text : '—'}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <p class="feb29-note" id="feb29-note" hidden>* Non-leap years show February 28.</p>
+
+      <footer>
+        <p>Daily UTC closes · Source: CryptoCompare · Live price: CoinGecko · Not financial advice</p>
+      </footer>
+    </main>
+
+    <script id="coin-data" type="application/json" set:html={JSON.stringify({ slug: coin.slug, coins: allCoins })} />
+
+    <script>
+      import {
+        MONTHS, buildYearlyRows, formatDate, formatPrice, formatChange, punchlineText, epochDayFor,
+      } from '../lib/prices.js';
+
+      const coinData = JSON.parse(document.getElementById('coin-data').textContent);
+
+      const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      const now = new Date();
+      const CURRENT_YEAR = now.getFullYear(); // visitor's local year
+      const LIVE_INTERVAL_MS = 30_000;
+
+      // ---------- State ----------
+      const params = new URLSearchParams(location.search);
+      const clampInt = (v, min, max, fb) => {
+        const n = parseInt(v, 10);
+        return Number.isInteger(n) && n >= min && n <= max ? n : fb;
+      };
+      const state = {
+        slug: coinData.slug,
+        // Default view = the visitor's LOCAL today (not UTC — UTC flips to
+        // "tomorrow" in the evening for the Americas, which has no data yet).
+        month: clampInt(params.get('month'), 1, 12, now.getMonth() + 1),
+        day: clampInt(params.get('day'), 1, 31, now.getDate()),
+        prices: null,
+        livePrice: null,
+        liveSupported: true,
+      };
+      state.day = Math.min(state.day, DAYS_IN_MONTH[state.month - 1]);
+
+      const meta = () => coinData.coins.find((c) => c.slug === state.slug);
+
+      // ---------- Elements ----------
+      const coinBtn = document.getElementById('coin-btn');
+      const dateBtn = document.getElementById('date-btn');
+      const coinPanel = document.getElementById('coin-panel');
+      const datePanel = document.getElementById('date-panel');
+      const daysGrid = document.getElementById('days-grid');
+      const tbody = document.querySelector('.prices tbody');
+      const punchlineEl = document.querySelector('.punchline');
+      const feb29Note = document.getElementById('feb29-note');
+
+      // ---------- Data ----------
+      const priceCache = new Map();
+      async function loadPrices(slug) {
+        if (priceCache.has(slug)) return priceCache.get(slug);
+        const res = await fetch(`/data/prices/${slug}.json`);
+        if (!res.ok) throw new Error(`Failed to load ${slug}.json`);
+        const json = await res.json();
+        priceCache.set(slug, json.prices);
+        return json.prices;
+      }
+
+      // ---------- Render ----------
+      const isViewingToday = () =>
+        state.month === now.getMonth() + 1 && state.day === now.getDate();
+
+      function render() {
+        const m = meta();
+        document.body.style.setProperty('--accent', m.color);
+        coinBtn.querySelector('.txt').textContent = m.name.toUpperCase();
+        dateBtn.querySelector('.txt').textContent = `${MONTHS[state.month - 1].toUpperCase()} ${state.day}`;
+
+        const rows = buildYearlyRows(state.prices, state.month, state.day);
+        const today = isViewingToday() && rows.length > 0 && rows[0].year === CURRENT_YEAR;
+
+        if (today && state.livePrice) {
+          rows[0].price = state.livePrice;
+          const prev = rows[1];
+          rows[0].changePct = prev ? ((state.livePrice - prev.price) / prev.price) * 100 : null;
+        }
+
+        tbody.innerHTML = rows.length
+          ? rows.map((row, i) => {
+              const change = formatChange(row.changePct);
+              const arrow = change ? (change.dir === 'up' ? '▲ ' : change.dir === 'down' ? '▼ ' : '') : '';
+              const live = i === 0 && today && state.livePrice
+                ? '<span class="live-badge"><span class="dot"></span>LIVE</span>' : '';
+              return `<tr>
+                <td>${formatDate(row.dayEpoch)}</td>
+                <td class="price">${live}${formatPrice(row.price)}</td>
+                <td class="change ${change?.dir ?? ''}">${change ? arrow + change.text : '—'}</td>
+              </tr>`;
+            }).join('')
+          : '<tr><td colspan="3">No data for this date yet.</td></tr>';
+
+        punchlineEl.textContent = punchlineText(rows);
+        feb29Note.hidden = !(state.month === 2 && state.day === 29);
+        document.title = `${m.name} price history on ${MONTHS[state.month - 1]} ${state.day} — CoinRewind`;
+      }
+
+      function updateURL() {
+        history.replaceState(null, '', `/${state.slug}?month=${state.month}&day=${state.day}`);
+      }
+
+      // ---------- Live price ----------
+      async function fetchLivePrice(cgId) {
+        try {
+          const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd`, { cache: 'no-store' });
+          if (r.ok) {
+            const p = (await r.json())?.[cgId]?.usd;
+            if (typeof p === 'number' && p > 0) return p;
+          }
+        } catch {}
+        return null;
+      }
+
+      let pollTimer = null;
+      let lastAppliedLive = null;
+      let liveFails = 0;
+
+      async function pollLive() {
+        if (!state.liveSupported || !isViewingToday()) return;
+        const price = await fetchLivePrice(meta().cgId);
+        if (price === null) {
+          liveFails++;
+          if (liveFails >= 2) {
+            state.liveSupported = false;
+            render();
+          }
+          return;
+        }
+        liveFails = 0;
+        const prev = lastAppliedLive;
+        state.livePrice = price;
+        lastAppliedLive = price;
+        render();
+        if (prev !== null && price !== prev) flashPrice(price > prev ? 'up' : 'down');
+      }
+
+      function flashPrice(dir) {
+        const firstRow = tbody.querySelector('tr:first-child');
+        if (!firstRow) return;
+        for (const cell of firstRow.querySelectorAll('.price, .change')) {
+          cell.classList.remove('flash-up', 'flash-down');
+          void cell.offsetWidth; // restart the animation
+          cell.classList.add(dir === 'up' ? 'flash-up' : 'flash-down');
+        }
+      }
+
+      function syncPolling() {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        if (!isViewingToday()) {
+          state.livePrice = null;
+          lastAppliedLive = null;
+          return;
+        }
+        if (state.liveSupported) {
+          pollLive();
+          pollTimer = setInterval(() => { if (!document.hidden) pollLive(); }, LIVE_INTERVAL_MS);
+        }
+      }
+
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && pollTimer) pollLive();
+      });
+
+      // ---------- Panels ----------
+      function closePanels() { coinPanel.hidden = datePanel.hidden = true; }
+
+      coinBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        datePanel.hidden = true;
+        coinPanel.hidden = !coinPanel.hidden;
+      });
+      dateBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        coinPanel.hidden = true;
+        datePanel.hidden = !datePanel.hidden;
+      });
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.panel') && !e.target.closest('.title-btn')) closePanels();
+      });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanels(); });
+
+      async function selectCoin(slug) {
+        closePanels();
+        if (slug === state.slug) return;
+        state.slug = slug;
+        state.prices = await loadPrices(slug);
+        state.livePrice = null;
+        state.liveSupported = true;
+        liveFails = 0;
+        lastAppliedLive = null;
+        render();
+        updateURL();
+        syncPolling();
+        coinPanel.querySelectorAll('.panel-item').forEach((b) =>
+          b.classList.toggle('selected', b.dataset.slug === slug));
+      }
+      coinPanel.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-slug]');
+        if (btn) selectCoin(btn.dataset.slug);
+      });
+
+      function renderDatePanel() {
+        datePanel.querySelectorAll('[data-month]').forEach((b) =>
+          b.classList.toggle('selected', +b.dataset.month === state.month));
+        const n = DAYS_IN_MONTH[state.month - 1];
+        daysGrid.innerHTML = Array.from({ length: n }, (_, i) =>
+          `<button class="panel-item day ${i + 1 === state.day ? 'selected' : ''}" data-day="${i + 1}">${i + 1}</button>`
+        ).join('');
+      }
+
+      datePanel.querySelector('.months-grid').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-month]');
+        if (!btn) return;
+        state.month = +btn.dataset.month;
+        state.day = Math.min(state.day, DAYS_IN_MONTH[state.month - 1]);
+        renderDatePanel();
+        render();
+        updateURL();
+        syncPolling();
+      });
+      daysGrid.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-day]');
+        if (!btn) return;
+        state.day = +btn.dataset.day;
+        renderDatePanel();
+        render();
+        updateURL();
+        syncPolling();
+        closePanels();
+      });
+
+      // ---------- Init ----------
+      function stepBackOneDay() {
+        state.day -= 1;
+        if (state.day === 0) {
+          state.month = state.month === 1 ? 12 : state.month - 1;
+          state.day = DAYS_IN_MONTH[state.month - 1];
+        }
+      }
+
+      (async () => {
+        state.prices = await loadPrices(state.slug);
+
+        // Default date = visitor's LOCAL today. If that day has no data point yet
+        // (visitor ahead of UTC, e.g. Asia in the morning), fall back to the latest
+        // day that does — but never override a date explicitly shared in the URL.
+        if (!(params.has('month') && params.has('day'))) {
+          const map = new Map(state.prices);
+          for (let guard = 0; guard < 3 && !map.has(epochDayFor(CURRENT_YEAR, state.month, state.day)); guard++) {
+            stepBackOneDay();
+          }
+        }
+
+        renderDatePanel();
+        render();
+        syncPolling();
+        // Note: no updateURL() here on purpose — a param-free URL stays clean and
+        // means "today, for whoever opens it". Params appear only on user action.
+      })();
+    </script>
+  </body>
+</html>

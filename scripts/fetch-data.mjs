@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 /**
- * Fetches daily USD price history from CryptoCompare for each coin
- * in data/coins.json and writes compact JSON to data/prices/<slug>.json
+ * Fetches daily USD price history from CoinGecko for each coin
+ * in data/coins.json and writes compact JSON to public/data/prices/<slug>.json
  *
  * Price format: [dayEpoch, closeUsd] where dayEpoch = unix_seconds / 86400
  *
+ * IMPORTANT — CoinGecko Demo (free) plan limits history to the last 365 days.
+ * Existing JSON files are the frozen historical base (backfilled from
+ * CryptoCompare); this script only extends them forward. A full backfill of
+ * a brand-new coin is NOT possible on the free plan.
+ *
  * Usage:
- *   node --env-file=.env scripts/fetch-data.mjs              backfill (first run) or monthly refresh
+ *   node --env-file=.env scripts/fetch-data.mjs              monthly refresh (incremental, ~20 calls)
  *   node --env-file=.env scripts/fetch-data.mjs --coin BTC   single coin only
  *   node --env-file=.env scripts/fetch-data.mjs --spot       today's price for ALL coins in ONE call
  */
@@ -19,17 +24,15 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const COINS_FILE = path.join(ROOT, 'data', 'coins.json');
 const PRICES_DIR = path.join(ROOT, 'public', 'data', 'prices');
 
-const HISTORY_URL = 'https://min-api.cryptocompare.com/data/v2/histoday';
-const SPOT_URL = 'https://min-api.cryptocompare.com/data/pricemulti';
-const API_KEY = process.env.CRYPTOCOMPARE_API_KEY;
+const API_BASE = 'https://api.coingecko.com/api/v3';
+const API_KEY = process.env.COINGECKO_API_KEY;
 
-const PAGE_SIZE = 2000;          // API max per request (note: API returns limit+1 points)
-const MAX_PAGES = 25;            // safety net against runaway pagination
 const SECONDS_PER_DAY = 86400;
-const REQUEST_DELAY_MS = 2000;   // conservative: free tier throttles short windows
-const MAX_RETRIES = 5;           // network/HTTP retries (exponential backoff)
-const MAX_RATE_LIMIT_WAITS = 2;  // long waits when the API says "rate limit"
-const RATE_LIMIT_WAIT_MS = 65_000;
+const MAX_HISTORY_DAYS = 360;  // Demo plan serves ~365 days of history; keep a margin
+const REQUEST_DELAY_MS = 700;  // 100 calls/min ≈ 1 per 600ms; small margin
+const MAX_RETRIES = 5;         // network/HTTP retries (exponential backoff)
+const MAX_RATE_LIMIT_WAITS = 3; // HTTP 429: honor Retry-After / short waits
+const RATE_LIMIT_WAIT_MS = 10_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const todayEpochDay = () => Math.floor(Date.now() / 1000 / SECONDS_PER_DAY);
@@ -41,7 +44,7 @@ async function fetchJson(url) {
     let res;
     try {
       res = await fetch(url, {
-        headers: { authorization: `Apikey ${API_KEY}` },
+        headers: { 'x-cg-demo-api-key': API_KEY },
         signal: AbortSignal.timeout(30_000),
       });
     } catch (err) {
@@ -52,7 +55,20 @@ async function fetchJson(url) {
       throw new Error(`Network error after ${MAX_RETRIES} retries: ${err.message}`);
     }
 
-    if (res.status === 429 || res.status >= 500) {
+    if (res.status === 429) {
+      rateLimitWaits++;
+      if (rateLimitWaits <= MAX_RATE_LIMIT_WAITS) {
+        const retryAfter = Number(res.headers.get('retry-after'));
+        const wait = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : RATE_LIMIT_WAIT_MS;
+        console.log(`  Rate limited (429) — waiting ${wait / 1000}s (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS})...`);
+        await sleep(wait);
+        continue;
+      }
+      throw new Error('Still rate limited after several waits — re-run the script later');
+    }
+    if (res.status >= 500) {
       if (attempt <= MAX_RETRIES) {
         const wait = 1000 * 2 ** attempt;
         console.log(`  HTTP ${res.status}, retrying in ${wait / 1000}s...`);
@@ -63,86 +79,52 @@ async function fetchJson(url) {
     }
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
 
-    const json = await res.json();
-
-    if (json.Response === 'Error') {
-      const msg = json.Message || 'unknown error';
-      if (/rate limit/i.test(msg)) {
-        rateLimitWaits++;
-        if (rateLimitWaits <= MAX_RATE_LIMIT_WAITS) {
-          console.log(`  Rate limited — waiting 65s before retry (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS})...`);
-          await sleep(RATE_LIMIT_WAIT_MS);
-          continue;
-        }
-        throw new Error('Still rate limited after two 65s waits — re-run the script later');
-      }
-      throw new Error(`CryptoCompare: ${msg}`);
-    }
-    return json;
+    return res.json();
   }
-}
-
-/** histoday call: validates the nested Data.Data shape, returns raw points. */
-async function apiGetHistory(url) {
-  const json = await fetchJson(url);
-  const points = json?.Data?.Data;
-  if (!Array.isArray(points)) {
-    throw new Error(`Unexpected response shape: ${JSON.stringify(json).slice(0, 300)}`);
-  }
-  return points;
-}
-
-/** Keep only valid points, convert to [dayEpoch, close]. */
-function toEntries(points) {
-  const entries = [];
-  for (const p of points) {
-    if (typeof p.time === 'number' && typeof p.close === 'number' && p.close > 0) {
-      entries.push([Math.floor(p.time / SECONDS_PER_DAY), p.close]);
-    }
-  }
-  return entries;
-}
-
-/** First run: page backwards until a page adds no new days. */
-async function fetchFullHistory(symbol) {
-  const map = new Map();
-  let toTs = Math.floor(Date.now() / 1000);
-
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const points = await apiGetHistory(`${HISTORY_URL}?fsym=${symbol}&tsym=USD&limit=${PAGE_SIZE}&toTs=${toTs}`);
-    const sizeBefore = map.size;
-    for (const [day, close] of toEntries(points)) map.set(day, close);
-    const newDays = map.size - sizeBefore;
-    console.log(`  page ${page}: +${newDays} new days (total: ${map.size})`);
-
-    if (newDays === 0) break; // beginning of available history reached
-    toTs = Math.min(...points.map((p) => p.time)) - SECONDS_PER_DAY;
-    await sleep(REQUEST_DELAY_MS);
-  }
-  return [...map.entries()].sort((a, b) => a[0] - b[0]);
-}
-
-/** Monthly refresh: fetch only the days missing since the last stored day. */
-async function fetchIncremental(symbol, lastStoredDay) {
-  const missing = todayEpochDay() - lastStoredDay + 2; // small overlap for safety
-  if (missing > PAGE_SIZE) return fetchFullHistory(symbol); // gap too big, start over
-  const points = await apiGetHistory(`${HISTORY_URL}?fsym=${symbol}&tsym=USD&limit=${Math.max(missing, 1)}`);
-  return toEntries(points);
 }
 
 /**
- * Daily update: ONE pricemulti call returns the current price of every coin.
+ * market_chart/range returns { prices: [[msTimestamp, price], ...] }.
+ * Points are hourly for ranges < 90 days, daily beyond. Collapse to one
+ * close per UTC day by keeping the LAST point of each day.
+ */
+function toEntries(prices) {
+  const byDay = new Map();
+  for (const p of prices) {
+    const [ms, price] = p;
+    if (typeof ms === 'number' && typeof price === 'number' && price > 0) {
+      byDay.set(Math.floor(ms / 1000 / SECONDS_PER_DAY), price); // later points overwrite
+    }
+  }
+  return [...byDay.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+/** Fetch daily closes from `fromDay` (epoch day, inclusive) up to now. */
+async function fetchRange(cgId, fromDay) {
+  const from = fromDay * SECONDS_PER_DAY;
+  const to = Math.floor(Date.now() / 1000);
+  const json = await fetchJson(
+    `${API_BASE}/coins/${cgId}/market_chart/range?vs_currency=usd&from=${from}&to=${to}`
+  );
+  if (!Array.isArray(json?.prices)) {
+    throw new Error(`Unexpected response shape: ${JSON.stringify(json).slice(0, 300)}`);
+  }
+  return toEntries(json.prices);
+}
+
+/**
+ * Daily update: ONE simple/price call returns the current price of every coin.
  * Stored as today's data point (fallback for the live price on the site).
  * Cost: 1 API call for all 20 coins.
  */
 async function updateSpotPrices(coins) {
-  const fsyms = coins.map((c) => c.symbol).join(',');
-  const json = await fetchJson(`${SPOT_URL}?fsyms=${fsyms}&tsyms=USD`);
+  const ids = coins.map((c) => c.cgId).join(',');
+  const json = await fetchJson(`${API_BASE}/simple/price?ids=${ids}&vs_currencies=usd`);
   const today = todayEpochDay();
   let updated = 0;
 
   for (const coin of coins) {
-    const price = json?.[coin.symbol]?.USD;
+    const price = json?.[coin.cgId]?.usd;
     if (typeof price !== 'number' || price <= 0) {
       console.log(`  ${coin.symbol}: no spot price returned, skipping`);
       continue;
@@ -186,7 +168,7 @@ async function saveCoin(coin, prices) {
 
 async function main() {
   if (!API_KEY) {
-    console.error('ERROR: CRYPTOCOMPARE_API_KEY is missing. Copy .env.example to .env and fill it in.');
+    console.error('ERROR: COINGECKO_API_KEY is missing. Copy .env.example to .env and fill it in.');
     process.exit(1);
   }
 
@@ -213,23 +195,34 @@ async function main() {
     console.log(`\n${coin.name} (${coin.symbol})`);
     try {
       const existing = await loadExisting(coin.slug);
-      let prices;
 
-      if (existing?.prices?.length) {
-        const lastDay = existing.prices.at(-1)[0];
-        if (todayEpochDay() - lastDay <= 0) {
-          console.log('  already up to date');
-          report.push({ coin: coin.symbol, status: 'up-to-date', days: existing.prices.length });
-          continue;
-        }
-        const fresh = await fetchIncremental(coin.symbol, lastDay);
-        const map = new Map(existing.prices);
-        for (const e of fresh) map.set(e[0], e[1]);
-        prices = [...map.entries()].sort((a, b) => a[0] - b[0]);
-        console.log(`  +${fresh.length} days (total: ${prices.length})`);
-      } else {
-        prices = await fetchFullHistory(coin.symbol);
+      if (!existing?.prices?.length) {
+        // Option B: the frozen CryptoCompare files are the historical base.
+        // The Demo plan cannot backfill more than ~365 days, so a missing
+        // file is unrecoverable here.
+        console.error('  FAILED: no local file — full backfill is not possible on the CoinGecko Demo plan (365-day limit). Restore public/data/prices/' + coin.slug + '.json from git history.');
+        report.push({ coin: coin.symbol, status: 'ERROR', error: 'no local file, backfill impossible' });
+        continue;
       }
+
+      const lastDay = existing.prices.at(-1)[0];
+      const gap = todayEpochDay() - lastDay;
+      if (gap <= 0) {
+        console.log('  already up to date');
+        report.push({ coin: coin.symbol, status: 'up-to-date', days: existing.prices.length });
+        continue;
+      }
+      if (gap > MAX_HISTORY_DAYS) {
+        console.error(`  FAILED: gap of ${gap} days exceeds the CoinGecko Demo 365-day history limit — cannot fill it.`);
+        report.push({ coin: coin.symbol, status: 'ERROR', error: `gap ${gap}d > ${MAX_HISTORY_DAYS}d limit` });
+        continue;
+      }
+
+      const fresh = await fetchRange(coin.cgId, lastDay - 2); // small overlap for safety
+      const map = new Map(existing.prices);
+      for (const e of fresh) map.set(e[0], e[1]);
+      const prices = [...map.entries()].sort((a, b) => a[0] - b[0]);
+      console.log(`  +${fresh.length} days (total: ${prices.length})`);
 
       await saveCoin(coin, prices);
       report.push({

@@ -2,7 +2,7 @@ name: Daily spot prices
 
 on:
   schedule:
-    - cron: "5 4 */2 * *"
+    - cron: "5 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -21,7 +21,7 @@ jobs:
       - name: Update spot prices (1 API call)
         run: node scripts/fetch-data.mjs --spot
         env:
-          CRYPTOCOMPARE_API_KEY: ${{ secrets.CRYPTOCOMPARE_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
 
       - name: Commit changes if any
         run: |
